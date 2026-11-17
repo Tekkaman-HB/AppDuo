@@ -182,8 +182,23 @@ public struct CloneEngine {
             try Command.run("/usr/bin/codesign", ["--force", "--sign", "-", "--entitlements", entitlements.path, file.path])
         }
         // Sign nested containers deepest-first, then seal the root bundle.
-        if let iterator = fm.enumerator(at: app, includingPropertiesForKeys: [.isSymbolicLinkKey]) {
-            let containers = iterator.compactMap { $0 as? URL }.filter { ["app", "framework", "appex", "xpc", "bundle"].contains($0.pathExtension) && (try? $0.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true }.sorted { $0.path.count > $1.path.count }
+        if let iterator = fm.enumerator(at: app, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]) {
+            let containers = try iterator.compactMap { $0 as? URL }.filter { bundle in
+                guard ["app", "framework", "appex", "xpc", "bundle"].contains(bundle.pathExtension) else { return false }
+                let values = try bundle.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+                guard values.isDirectory == true, values.isSymbolicLink != true else { return false }
+                // Some SDKs ship bare resource directories named *.bundle (e.g.
+                // WorkBuddy's TuringShield.bundle contains only a privacy manifest).
+                // They have no bundle metadata and codesign rejects them as code.
+                // Keep them as resources sealed by their enclosing bundle instead.
+                // Bundles with metadata still need resealing, even without an executable.
+                if bundle.pathExtension == "bundle" {
+                    return ["Contents/Info.plist", "Resources/Info.plist", "Info.plist"].contains {
+                        fm.fileExists(atPath: bundle.appendingPathComponent($0).path)
+                    }
+                }
+                return true
+            }.sorted { $0.path.count > $1.path.count }
             for bundle in containers { try Command.run("/usr/bin/codesign", ["--force", "--sign", "-", "--preserve-metadata=entitlements", bundle.path]) }
         }
         try Command.run("/usr/bin/codesign", ["--force", "--sign", "-", "--preserve-metadata=entitlements", app.path])

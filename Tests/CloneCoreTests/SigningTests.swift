@@ -2,6 +2,56 @@ import XCTest
 @testable import CloneCore
 
 final class SigningTests: XCTestCase {
+    func testBareResourceBundleIsSealedAsDataRatherThanSignedAsCode() throws {
+        let (root, config) = try EngineTests().fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let relative = "Contents/Resources/TuringShield.bundle/PrivacyInfo.xcprivacy"
+        let manifest = config.source.appendingPathComponent(relative)
+        try FileManager.default.createDirectory(at: manifest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let bytes = Data("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict/></plist>".utf8)
+        try bytes.write(to: manifest)
+
+        _ = try CloneEngine().build(config)
+
+        let clonedManifest = config.destination.appendingPathComponent(relative)
+        XCTAssertEqual(try Data(contentsOf: clonedManifest), bytes)
+        try Command.run("/usr/bin/codesign", ["--verify", "--deep", "--strict", config.destination.path])
+        try Data("tampered".utf8).write(to: clonedManifest)
+        XCTAssertThrowsError(try Command.run("/usr/bin/codesign", ["--verify", "--deep", "--strict", config.destination.path]))
+        XCTAssertEqual(try Data(contentsOf: manifest), bytes)
+    }
+
+    func testResourceBundleWithMetadataIsStillResealed() throws {
+        let (root, config) = try EngineTests().fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let relative = "Contents/Resources/Metadata.bundle"
+        let bundle = config.source.appendingPathComponent(relative)
+        let resources = bundle.appendingPathComponent("Contents/Resources")
+        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+        try Plist.write(["CFBundleIdentifier": "com.atb.test.resources", "CFBundlePackageType": "BNDL"], to: bundle.appendingPathComponent("Contents/Info.plist"))
+        try Data("fixture".utf8).write(to: resources.appendingPathComponent("data.txt"))
+        try Command.run("/usr/bin/codesign", ["--force", "--sign", "-", bundle.path])
+
+        _ = try CloneEngine().build(config)
+
+        let clonedBundle = config.destination.appendingPathComponent(relative)
+        try Command.run("/usr/bin/codesign", ["--verify", "--strict", clonedBundle.path])
+        try Command.run("/usr/bin/codesign", ["--verify", "--deep", "--strict", config.destination.path])
+    }
+
+    func testMalformedCodeBundleStillFailsSigning() throws {
+        let (root, config) = try EngineTests().fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let malformed = config.source.appendingPathComponent("Contents/Helpers/Malformed.app")
+        try FileManager.default.createDirectory(at: malformed, withIntermediateDirectories: true)
+        try Data("not a code bundle".utf8).write(to: malformed.appendingPathComponent("data.txt"))
+
+        XCTAssertThrowsError(try CloneEngine().build(config)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("codesign"), error.localizedDescription)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: config.destination.path))
+    }
+
     func testNestedGenericSignatureSurvivesAttributeCleanup() throws {
         let (root, config) = try EngineTests().fixture()
         defer { try? FileManager.default.removeItem(at: root) }
