@@ -1,5 +1,8 @@
 # WorkBuddy 分身兼容性修复：创建签名与启动失败
 
+> 当前修复以本文末尾“第三轮：找不到钥匙串”为准。第二轮的独立 HOME 方案已撤回，
+> 请使用 `dist/AppDuo-0.1.9-workbuddy-keychain-fix-arm64.dmg`。
+
 ## 本机复现（2026-11-17）
 
 - 已安装 AppDuo：0.1.9。
@@ -206,3 +209,78 @@ Unable to find helper app
 
 边界：已验证真实窗口启动，但没有登录账号，也没有验证消息收发、通知、
 插件、所有辅助工具和完整的账号隔离；不能据此保证所有业务功能或安全边界完全隔离。
+
+
+## 第三轮：找不到钥匙串（2026-11-17）
+
+用户在启动分身后看到系统提示：
+
+```text
+找不到钥匙串
+找不到用于储存 “com.turingshield.identifying.guid.Local” 的钥匙串。
+```
+
+**不要为此点击“还原为默认”，不要重置/删除登录钥匙串。**
+
+### 根因与修正
+
+上一轮为 WorkBuddy 新增的 `HOME={{ATB_DATA_DIR}}/Home` 存在兼容问题：
+macOS Security 无法在该合成 HOME 下解析现有的默认登录钥匙串。
+此前的窗口启动测试没有覆盖 TuringShield 后续的钥匙串访问，不能据此保证应用完整可用。
+
+只读复现，不读取任何钥匙串条目或密码：
+
+```bash
+/usr/bin/security default-keychain -d user
+# 正常返回真实用户的 Library/Keychains/login.keychain-db
+
+env HOME="$HOME/AppDuo/Data/WorkBuddy 2/Home" \
+  /usr/bin/security default-keychain -d user
+# security: SecKeychainCopyDomainDefault user: A default keychain could not be found.
+```
+
+本轮修正：
+
+- WorkBuddy 配方不再注入 `HOME`，让系统使用正常登录用户目录定位钥匙串。
+- 仍保留 `TMPDIR`、`WORKBUDDY_CONFIG_DIR`、`CODEBUDDY_CONFIG_DIR`、
+  `WORKBUDDY_USER_DATA_DIR`，配置及 Electron userData 仍指向现有分身数据目录。
+- 更新旧记录时，仅在新配方未设置 HOME 且旧值精确等于此前生成的
+  `{{ATB_DATA_DIR}}/Home` 时移除该覆盖；显式自定义的其他 HOME 值保持不变。
+- 不删除旧 `Home` 目录，不迁移、复制或重置任何钥匙串，不修改条目访问控制。
+- 保留前两轮 Electron 内部名、辅助程序原名和资源签名修复。
+
+### 现有分身与备份
+
+已更新 `~/AppDuo/Apps/WorkBuddy 2.app`。
+本轮更新前的应用包及记录备份：
+
+```text
+~/AppDuo/Backups/workbuddy-keychain-20261117-232109/
+```
+
+更新后分身 ID、名称、显示名、创建时间和配置/数据路径未变。
+默认钥匙串及用户钥匙串搜索列表在测试前后逐字一致；未替换已安装 AppDuo。
+
+### 验证及限制
+
+- 新增无交互的 Security.framework 元数据测试：关闭该测试进程的钥匙串 UI，
+  仅调用 `SecKeychainCopyDefault` / `SecKeychainGetPath`，
+  确认新配方生成的启动器与正常用户环境返回同一默认钥匙串。
+  不查询条目、不读取密码、不写入钥匙串、不解锁或修改权限。
+- 新增旧 HOME 覆盖迁移测试，检查旧 Home 数据标记及记录身份保留；
+  保留自定义 HOME 的回归测试仍通过。
+- Debug 和 Release CLI 的 Python 集成回归均为 6 项通过。
+- 更新后的真实分身再次出现 1440×900 可见主窗口，回调确认是分身本身；
+  测试结束后关闭该分身。此项仅证明窗口启动，不等同于人工确认所有后续系统弹窗消失。
+- 新 GUI 严格签名/资源检查、新 DMG 校验及只读挂载后的签名/资源检查通过；
+  镜像内主程序及配方与构建产物一致，`dist/SHA256SUMS` 已更新。
+- 新增/更新的 XCTest 仍未运行，原因仍为本机缺少 XCTest 工具链。
+
+新版包：`dist/AppDuo-0.1.9-workbuddy-keychain-fix-arm64.dmg`，
+GUI 应用仍为 `dist/AppDuo.app`。旧 `workbuddy-startup-fix` 包仍包含独立 HOME 设置，
+不能再用它更新 WorkBuddy 分身。
+
+这不是钥匙串隔离方案：系统钥匙串及依赖真实 HOME 的厂商共享认证机制并未虚拟化。
+仅验证配置目录及 userData 的指定路径，不承诺所有账号状态完全隔离。
+若之后出现“允许访问钥匙串”之类正常授权提示，应由用户判断是否授权，
+本工具不代填系统密码或自动允许。完整登录、收发消息、通知、插件等业务仍未验证。

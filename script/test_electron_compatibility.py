@@ -151,6 +151,61 @@ class ElectronCompatibilityTests(unittest.TestCase):
         self.assertEqual(marker.read_text(), "do not delete")
         self.verify()
 
+    def use_workbuddy_bundle_id(self):
+        self.add_electron()
+        metadata = plistlib.loads(self.plist.read_bytes())
+        metadata["CFBundleIdentifier"] = "com.tencent.workbuddy.mac"
+        self.write_plist(self.plist, metadata)
+
+    def test_workbuddy_uses_login_default_keychain_without_prompting(self):
+        self.use_workbuddy_bundle_id()
+        # Read metadata only: no password/item access, writes, unlocks or dialogs.
+        code = self.root / "keychain.c"
+        code.write_text(r'''
+#include <Security/Security.h>
+#include <stdio.h>
+int main(void) {
+    SecKeychainSetUserInteractionAllowed(false);
+    SecKeychainRef keychain = NULL;
+    OSStatus status = SecKeychainCopyDefault(&keychain);
+    char path[4096] = {0}; UInt32 length = sizeof(path);
+    if (status == errSecSuccess) status = SecKeychainGetPath(keychain, &length, path);
+    printf("status=%d;path=%s\n", (int)status, path);
+    if (keychain) CFRelease(keychain);
+    return status == errSecSuccess ? 0 : 1;
+}
+''')
+        executable = self.source / "Contents/MacOS/Original"
+        run("/usr/bin/xcrun", "clang", code, "-framework", "Security", "-framework", "CoreFoundation", "-o", executable)
+        baseline = subprocess.run([str(executable)], capture_output=True, text=True)
+        if baseline.returncode:
+            self.skipTest("Host has no usable default keychain metadata")
+        info = self.clone()
+        config = json.loads((self.state / "clones.json").read_text())[0]["configuration"]
+        self.assertNotIn("HOME", config["recipe"]["environment"])
+        self.assertEqual(config["recipe"]["environment"]["WORKBUDDY_USER_DATA_DIR"], "{{ATB_DATA_DIR}}/UserData")
+        self.assertEqual(run(self.destination / "Contents/MacOS" / info["CFBundleExecutable"]), baseline.stdout)
+        self.verify()
+
+    def test_previous_generated_workbuddy_home_override_is_retired(self):
+        self.use_workbuddy_bundle_id()
+        self.clone()
+        record_file = self.state / "clones.json"
+        records = json.loads(record_file.read_text())
+        records[0]["configuration"]["recipe"]["environment"]["HOME"] = "{{ATB_DATA_DIR}}/Home"
+        record_file.write_text(json.dumps(records))
+        marker = self.state / "Data/Clone/Home/keep.txt"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("existing home data")
+        run(CLI, "update", "Clone", "--root", self.state)
+        after = json.loads(record_file.read_text())[0]
+        self.assertNotIn("HOME", after["configuration"]["recipe"]["environment"])
+        self.assertEqual(after["configuration"]["recipe"]["environment"]["WORKBUDDY_CONFIG_DIR"], "{{ATB_DATA_DIR}}/Config")
+        self.assertEqual(after["createdAt"], records[0]["createdAt"])
+        self.assertEqual(after["configuration"]["id"], records[0]["configuration"]["id"])
+        self.assertEqual(marker.read_text(), "existing home data")
+        self.verify()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
