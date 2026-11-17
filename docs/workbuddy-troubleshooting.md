@@ -1,7 +1,8 @@
 # WorkBuddy 分身兼容性修复：创建签名与启动失败
 
-> 当前修复以本文末尾“第三轮：找不到钥匙串”为准。第二轮的独立 HOME 方案已撤回，
-> 请使用 `dist/AppDuo-0.1.9-workbuddy-keychain-fix-arm64.dmg`。
+> 当前修复以本文末尾“第四轮：共享登录”为准。前面的第二轮与第三轮均为排查历史，
+> 不应继续使用其中的旧配方或安装包。当前包：
+> `dist/AppDuo-0.1.9-workbuddy-auth-isolation-fix-arm64.dmg`。
 
 ## 本机复现（2026-11-17）
 
@@ -284,3 +285,110 @@ GUI 应用仍为 `dist/AppDuo.app`。旧 `workbuddy-startup-fix` 包仍包含独
 仅验证配置目录及 userData 的指定路径，不承诺所有账号状态完全隔离。
 若之后出现“允许访问钥匙串”之类正常授权提示，应由用户判断是否授权，
 本工具不代填系统密码或自动允许。完整登录、收发消息、通知、插件等业务仍未验证。
+
+
+## 第四轮：共享登录（2026-11-17）
+
+### 根因：配置目录隔离不等于登录文件隔离
+
+第三轮撤回独立 HOME 后虽然修复了钥匙串定位，但 WorkBuddy 原版和分身重新
+通过同一个系统 HOME 解析登录文件，因此无法提供独立的账号会话。
+
+检查原版 WorkBuddy 5.11.3 随包代码（不读取账号文件）确认：
+
+- `main/module-base.js` 中的 `FilePathServiceImpl.getBasePath()` 从
+  `os.homedir()` 解析 `Library/Application Support/CodeBuddyExtension`。
+- `main/file-authentication-storage.js` 的 `getAuthSavePath()` 使用
+  `sharedDataPath/auth/<authentication.id>.info`，并监听外部写入/退出标记。
+- `main/workbuddy-product-config.js` 的 `getSharedAuthDirectory()` 也独立地
+  通过 `os.homedir()` 解析同一目录，而不是使用 `WORKBUDDY_CONFIG_DIR`。
+- 旧版本会话迁移路径同样通过用户 HOME 解析。仅改 userData 不能隔离该路径。
+
+### 当前方案：独立 HOME，仅共享系统钥匙串目录
+
+恢复 `HOME={{ATB_DATA_DIR}}/Home`，并在既有 `symlink_whitelist` 中仅增加：
+
+```yaml
+symlink_whitelist:
+- Library/Keychains
+```
+
+这利用现有 CloneEngine 的受控链接功能：
+
+```text
+<分身数据目录>/Home/Library/Keychains -> ~/Library/Keychains
+```
+
+它与飞书配方中已有的 HOME/钥匙串处理方式一致。本机只读验证确认，这种方式下
+Security 可以正常定位既有默认登录钥匙串，不需要把应用的整个 HOME 恢复到原版。
+没有修改 WorkBuddy 的 ASAR、认证逻辑、认证 ID 或服务器校验，也没有修改原版应用。
+
+**不得链接 `Library/Application Support/CodeBuddyExtension` 或其中的 auth 目录，
+否则会再次共享登录。** 系统钥匙串仍受 macOS 自身的授权控制，本方案不复制其中的密码、
+不修改条目 ACL、不创建或重置登录钥匙串，不冒充独立 macOS 用户或安全沙箱。
+
+旧记录更新时合并缺失的 HOME/专用变量，并合并新加入的钥匙串共享路径，
+保留已有自定义环境覆盖、其他共享路径、UUID、显示名及数据目录。
+已存在的文件和旧 Home 内容不会被删除或覆盖；若某个自定义共享路径本就共享认证目录，
+仍须用户自行审查，它不能被视为账号隔离配置。
+
+### 现有分身已更新及实际启动结果
+
+更新前备份：
+
+```text
+~/AppDuo/Backups/workbuddy-auth-isolation-20261117-233500/
+```
+
+现有 `WorkBuddy 2.app` 已更新。新的 auth 文件目录为：
+
+```text
+~/AppDuo/Data/WorkBuddy 2/Home/Library/Application Support/CodeBuddyExtension/Data/Public/auth/
+```
+
+原版 auth 目录仍是：
+
+```text
+~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/
+```
+
+检查确认它们不是同一个解析路径。没有把原版的登录文件复制进分身。
+启动新分身后，仅统计新追加日志中的已知事件，不输出会话内容：
+
+- `No auth file found, no existing session`：1 次。
+- `stage=noAuthFile`：1 次。
+- `Restored auth session from file`：0 次。
+- `Migrated auth session from legacy source`：0 次。
+
+因此本次启动未自动恢复原版账号。分身出现 1440×900 的可见主窗口，测试后正常关闭。
+原版进程仍在；测试期间原版 auth 目录中文件的 inode、大小、修改时间未变化。
+正常 HOME 和真实分身 HOME 都返回同一默认登录钥匙串，用户默认钥匙串及搜索列表未变。
+
+### 回归验证
+
+1. Debug、Release 的 `script/test_electron_compatibility.py` 均为 7 项通过，
+   包括独立 HOME 下的无交互钥匙串定位、旧无 HOME 记录升级、旧有 HOME 记录补链接、
+   自定义 HOME 保留，以及既有 Electron/原生命名检查。
+2. 新增 `script/test_workbuddy_auth_paths.py`：从实际安装的 ASAR 只读提取上述
+   登录路径函数，结合两份临时 CLI 分身的实际启动器 HOME 执行路径测试。
+   两份分身及模拟原版的登录、产品配置读取和旧版迁移路径均独立。
+   使用虚构账号文件和退出标记验证：退出模拟分身 A，不会影响模拟原版及分身 B。
+   这些不是有效账号，不访问服务器，不读取或修改真实登录文件。
+3. 新 GUI 与 DMG 已重新生成；严格签名、资源加载、镜像校验和只读挂载复核通过。
+4. XCTest 仍因本机缺少工具链而未执行，不将 Python 回归结果冒充 XCTest 结果。
+
+运行方式：
+
+```bash
+python3 script/test_electron_compatibility.py
+python3 script/test_workbuddy_auth_paths.py /Applications/WorkBuddy.app
+```
+
+**验证边界：这次验证了认证路径、虚构会话/退出标记隔离，以及真实应用启动时未恢复账号。
+没有替用户完成两个真实账号的登录、消息收发或退出联动测试，也不承诺服务端允许所有多开场景。**
+接下来需用户在分身登录另一个账号，并保留原版账号验证业务行为。
+
+当前 GUI：`dist/AppDuo.app`。
+当前安装包：`dist/AppDuo-0.1.9-workbuddy-auth-isolation-fix-arm64.dmg`。
+退出旧 AppDuo 后使用新版；不要再用前面的 `keychain-fix`（共享 HOME）或
+`startup-fix`（缺少钥匙串链接）包更新分身。没有自动替换 `/Applications/AppDuo.app`。

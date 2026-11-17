@@ -33,7 +33,7 @@ class ElectronCompatibilityTests(unittest.TestCase):
         cls.toolchain = tempfile.TemporaryDirectory(prefix="appduo-electron-fixtures-")
         cls.tools = Path(cls.toolchain.name)
         code = cls.tools / "fixture.c"
-        code.write_text('#include <stdio.h>\nint main(int argc, char **argv) { puts(argv[0]); return 0; }\n')
+        code.write_text('#include <stdio.h>\n#include <stdlib.h>\nint main(int argc, char **argv) { puts(getenv("APPDUO_TEST_PRINT_HOME") ? getenv("HOME") : argv[0]); return 0; }\n')
         cls.executable = cls.tools / "Original"
         cls.library = cls.tools / "Electron Framework"
         run("/usr/bin/xcrun", "clang", "-Wl,-headerpad,0x1000", code, "-o", cls.executable)
@@ -146,6 +146,9 @@ class ElectronCompatibilityTests(unittest.TestCase):
         self.assertEqual(environment["WORKBUDDY_CONFIG_DIR"], "{{ATB_DATA_DIR}}/Config")
         self.assertEqual(environment["CODEBUDDY_CONFIG_DIR"], "{{ATB_DATA_DIR}}/Config")
         self.assertEqual(environment["WORKBUDDY_USER_DATA_DIR"], "{{ATB_DATA_DIR}}/UserData")
+        custom_keychain = self.state / "Data/Clone/CustomHome/Library/Keychains"
+        self.assertTrue(custom_keychain.is_symlink())
+        self.assertEqual(custom_keychain.resolve(), (Path.home() / "Library/Keychains").resolve())
         self.assertEqual(after["createdAt"], records[0]["createdAt"])
         self.assertEqual(after["configuration"]["dataDirectory"], config["dataDirectory"])
         self.assertEqual(marker.read_text(), "do not delete")
@@ -182,12 +185,16 @@ int main(void) {
             self.skipTest("Host has no usable default keychain metadata")
         info = self.clone()
         config = json.loads((self.state / "clones.json").read_text())[0]["configuration"]
-        self.assertNotIn("HOME", config["recipe"]["environment"])
+        self.assertEqual(config["recipe"]["environment"]["HOME"], "{{ATB_DATA_DIR}}/Home")
+        self.assertEqual(config["recipe"]["symlinks"], ["Library/Keychains"])
+        link = self.state / "Data/Clone/Home/Library/Keychains"
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(link.resolve(), (Path.home() / "Library/Keychains").resolve())
         self.assertEqual(config["recipe"]["environment"]["WORKBUDDY_USER_DATA_DIR"], "{{ATB_DATA_DIR}}/UserData")
         self.assertEqual(run(self.destination / "Contents/MacOS" / info["CFBundleExecutable"]), baseline.stdout)
         self.verify()
 
-    def test_previous_generated_workbuddy_home_override_is_retired(self):
+    def test_previous_isolated_workbuddy_home_gains_keychain_link(self):
         self.use_workbuddy_bundle_id()
         self.clone()
         record_file = self.state / "clones.json"
@@ -199,11 +206,29 @@ int main(void) {
         marker.write_text("existing home data")
         run(CLI, "update", "Clone", "--root", self.state)
         after = json.loads(record_file.read_text())[0]
-        self.assertNotIn("HOME", after["configuration"]["recipe"]["environment"])
+        self.assertEqual(after["configuration"]["recipe"]["environment"]["HOME"], "{{ATB_DATA_DIR}}/Home")
+        self.assertEqual(after["configuration"]["recipe"]["symlinks"], ["Library/Keychains"])
         self.assertEqual(after["configuration"]["recipe"]["environment"]["WORKBUDDY_CONFIG_DIR"], "{{ATB_DATA_DIR}}/Config")
         self.assertEqual(after["createdAt"], records[0]["createdAt"])
         self.assertEqual(after["configuration"]["id"], records[0]["configuration"]["id"])
         self.assertEqual(marker.read_text(), "existing home data")
+        self.verify()
+
+
+    def test_workbuddy_without_home_gains_auth_isolation_on_update(self):
+        self.use_workbuddy_bundle_id()
+        self.clone()
+        record_file = self.state / "clones.json"
+        records = json.loads(record_file.read_text())
+        recipe = records[0]["configuration"]["recipe"]
+        recipe["environment"].pop("HOME")
+        recipe["symlinks"] = ["Documents"]
+        record_file.write_text(json.dumps(records))
+        run(CLI, "update", "Clone", "--root", self.state)
+        after = json.loads(record_file.read_text())[0]
+        self.assertEqual(after["configuration"]["recipe"]["environment"]["HOME"], "{{ATB_DATA_DIR}}/Home")
+        self.assertEqual(after["configuration"]["recipe"]["symlinks"], ["Documents", "Library/Keychains"])
+        self.assertEqual(after["configuration"]["id"], records[0]["configuration"]["id"])
         self.verify()
 
 

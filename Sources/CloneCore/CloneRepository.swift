@@ -51,15 +51,13 @@ public actor CloneRepository {
                 // Fill missing isolation variables without replacing user overrides or
                 // moving/deleting any existing data directory.
                 if effective.recipe.bundleID == "com.tencent.workbuddy.mac" {
-                    // Retire only the HOME override emitted by the previous bundled
-                    // recipe. A synthetic HOME hides the user's default keychain from
-                    // Security.framework. Keep explicit custom HOME choices intact,
-                    // and never migrate/delete the old Home directory or keychain data.
-                    if current.environment["HOME"] == nil,
-                       effective.recipe.environment["HOME"] == "{{ATB_DATA_DIR}}/Home" {
-                        effective.recipe.environment.removeValue(forKey: "HOME")
-                    }
                     effective.recipe.environment.merge(current.environment) { existing, _ in existing }
+                    // Legacy records may have an isolated HOME without keychain access,
+                    // or no HOME at all. Bring over the current narrow sharing policy:
+                    // share the OS keychain directory, never the shared login/auth files.
+                    for path in current.symlinks where !effective.recipe.symlinks.contains(path) {
+                        effective.recipe.symlinks.append(path)
+                    }
                 }
             }
             try Secrets.save(password, id: configuration.id)

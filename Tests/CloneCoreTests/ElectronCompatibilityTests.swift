@@ -68,7 +68,8 @@ final class ElectronCompatibilityTests: XCTestCase {
 
     func testWorkBuddyRecipeProvidesApplicationSpecificIsolation() throws {
         let recipe = try XCTUnwrap(Recipes.load().first { $0.bundleID == "com.tencent.workbuddy.mac" })
-        XCTAssertNil(recipe.environment["HOME"])
+        XCTAssertEqual(recipe.environment["HOME"], "{{ATB_DATA_DIR}}/Home")
+        XCTAssertEqual(recipe.symlinks, ["Library/Keychains"])
         XCTAssertEqual(recipe.environment["TMPDIR"], "{{ATB_DATA_DIR}}/Tmp")
         XCTAssertEqual(recipe.environment["WORKBUDDY_CONFIG_DIR"], "{{ATB_DATA_DIR}}/Config")
         XCTAssertEqual(recipe.environment["CODEBUDDY_CONFIG_DIR"], "{{ATB_DATA_DIR}}/Config")
@@ -99,7 +100,7 @@ final class ElectronCompatibilityTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: marker), Data("existing data".utf8))
     }
 
-    func testLegacyWorkBuddyUpdateRemovesOnlyGeneratedHomeOverride() async throws {
+    func testLegacyWorkBuddyUpdateKeepsIsolatedHomeAndAddsKeychainLink() async throws {
         let (root, base) = try EngineTests().fixture()
         defer { try? FileManager.default.removeItem(at: root) }
         var config = base
@@ -113,7 +114,10 @@ final class ElectronCompatibilityTests: XCTestCase {
         let marker = config.dataDirectory.appendingPathComponent("Home/keep.txt")
         try Data("existing home data".utf8).write(to: marker)
         let after = try await repository.build(before[0].configuration, password: "", updating: true, log: { _ in })
-        XCTAssertNil(after[0].configuration.recipe.environment["HOME"])
+        XCTAssertEqual(after[0].configuration.recipe.environment["HOME"], "{{ATB_DATA_DIR}}/Home")
+        XCTAssertEqual(after[0].configuration.recipe.symlinks, ["Library/Keychains"])
+        let link = config.dataDirectory.appendingPathComponent("Home/Library/Keychains")
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: link.path), NSHomeDirectory() + "/Library/Keychains")
         XCTAssertEqual(after[0].configuration.recipe.environment["WORKBUDDY_CONFIG_DIR"], "{{ATB_DATA_DIR}}/Config")
         XCTAssertEqual(after[0].id, before[0].id)
         XCTAssertEqual(after[0].createdAt, before[0].createdAt)
