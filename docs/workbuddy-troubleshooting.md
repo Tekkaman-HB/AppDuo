@@ -34,7 +34,37 @@ WorkBuddy 的 `Contents/Resources/TuringShield.bundle` 只有
 
 不需要删除隐私声明文件、修改原版 WorkBuddy 或关闭系统安全功能。
 
-## 当前可用方案：修复后的 CLI
+## GUI 修复版（2026-11-17 本地重新打包）
+
+已利用本机保留的 macOS 26.5 SDK 成功完成 Release GUI 构建，绕过默认
+macOS 27.2 SDK 对缺失 `SwiftUIMacros` 插件的依赖，无需为本次打包修改系统 SDK 或安装完整 Xcode。
+
+产物：
+
+- 应用：`dist/AppDuo.app`。
+- 安装镜像：`dist/AppDuo-0.1.9-workbuddy-fix-arm64.dmg`。
+- 基于 0.1.9 的本地修复构建，Apple Silicon（arm64），并非新的官方版本。
+
+先退出旧 AppDuo，再打开修复版：
+
+```bash
+open -n "$PWD/dist/AppDuo.app"
+```
+
+也可以打开 DMG，将应用安装到 `/Applications`（替换之前先退出旧版）。
+本次打包没有自动替换已安装应用，也没有迁移或删除用户分身数据。
+该构建为本地 ad-hoc 签名，未经过 Apple 公证，未配置 Sparkle 自动更新公钥。
+
+复现打包：
+
+```bash
+SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk \
+CONFIGURATION=release bash script/build_and_run.sh --dmg
+```
+
+脚本默认生成 `dist/AppDuo-arm64.dmg`；本次分发镜像另行重命名以标识 WorkBuddy 修复。
+
+## 修复后的 CLI（可选）
 
 在本仓库中：
 
@@ -65,14 +95,17 @@ open "$HOME/AppDuo/Apps/WorkBuddy 2.app"
    有元数据的资源包和含可执行程序的嵌套代码包仍可签名；损坏的代码包仍被拒绝。
 5. 在 `Tests/CloneCoreTests/SigningTests.swift` 增加三个对应 XCTest 回归测试。
 
-限制：本机仅选择了 Command Line Tools，没有完整 Xcode；独立 XCTest 构建报
-`unable to resolve module dependency: 'XCTest'`，GUI 构建报缺少 `SwiftUIMacros` 插件。
-因此本次没有完成 XCTest 套件运行或 GUI 打包，也未替换 `/Applications/AppDuo.app`。
-CLI 已成功编译和验证；在具备所需插件的完整 Xcode 环境中，可继续运行：
+补充验证：Release GUI 与 DMG 已成功生成，应用通过严格递归签名验证和
+`--check-resources` 资源加载检查。DMG 校验和、只读挂载后的应用签名与资源加载均经过复核，
+镜像内主程序与 `dist/AppDuo.app` 中主程序逐字节一致。
+
+测试限制：本机仅选择了 Command Line Tools，没有完整 Xcode；独立 XCTest 构建报
+`unable to resolve module dependency: 'XCTest'`，因此 XCTest 套件尚未运行。
+最初 GUI 构建报缺少 `SwiftUIMacros` 插件的问题，已通过上述 macOS 26.5 SDK 构建方式解决。
+在具备 XCTest 的工具链环境中仍应运行：
 
 ```bash
 swift test --filter SigningTests
-bash script/build_and_run.sh --build
 ```
 
 真实分身测试仅在独立临时目录执行，没有启动或登录该分身；账号登录、完整数据隔离、
