@@ -32,7 +32,11 @@ public struct CloneEngine {
         let metadataURL = staging.appendingPathComponent("Contents/Info.plist")
         var metadata = try Plist.read(metadataURL)
         metadata["CFBundleIdentifier"] = config.bundleID
-        metadata["CFBundleName"] = config.displayName
+        // Electron uses CFBundleName to locate "<name> Helper.app" under Frameworks.
+        // Changing this internal name breaks child-process discovery even when every
+        // signature is valid. Keep the source value (including an absent value);
+        // the visible clone name and renamed processes remain independent.
+        if info.type != "electron" { metadata["CFBundleName"] = config.displayName }
         metadata["CFBundleDisplayName"] = config.displayName
         metadata.removeValue(forKey: "TeamIdentifier"); metadata.removeValue(forKey: "LSHasLocalizedDisplayName")
         if config.recipe.stripURLs || config.recipe.lark || config.recipe.chatgpt { metadata.removeValue(forKey: "CFBundleURLTypes") }
@@ -73,7 +77,10 @@ public struct CloneEngine {
                 try injected.write(to: main)
             }
             let preserveMain = config.recipe.preserveMainExecutableName == true
-            try ProcessNames.rename(in: staging, main: main, name: config.name, renameMain: !preserveMain)
+            // Electron's bundled helpers and tools can depend on their real executable
+            // basenames, not just aliases. Renaming them can stall initialization before
+            // any window appears. Only give the main process the clone's independent name.
+            try ProcessNames.rename(in: staging, main: main, name: config.name, renameMain: !preserveMain, renameAuxiliaryExecutables: info.type != "electron")
             if !useDylib {
                 if needsHook {
                     try RuntimeBuilder.compile(String(contentsOf: Assets.root.appendingPathComponent("Isolation.m"), encoding: .utf8), output: frameworks.appendingPathComponent("libatbclone_hook.dylib"), library: true, objc: true)

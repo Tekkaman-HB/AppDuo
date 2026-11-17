@@ -1,10 +1,10 @@
-# WorkBuddy 分身创建失败：资源目录被误当成代码包签名
+# WorkBuddy 分身兼容性修复：创建签名与启动失败
 
 ## 本机复现（2026-11-17）
 
 - 已安装 AppDuo：0.1.9。
 - WorkBuddy：5.11.3，Bundle ID `com.tencent.workbuddy.mac`，Electron 应用。
-- 默认匹配规则：`hard_clone`，使用独立 `--user-data-dir` 参数。
+- 最初通用匹配规则：`hard_clone`，仅使用 `--user-data-dir` 参数；后续启动排查发现该参数不足以隔离 WorkBuddy，见下文。
 - 未修复引擎在独立临时目录创建分身时，停在“重新签名并验证”：
 
 ```text
@@ -108,5 +108,101 @@ open "$HOME/AppDuo/Apps/WorkBuddy 2.app"
 swift test --filter SigningTests
 ```
 
-真实分身测试仅在独立临时目录执行，没有启动或登录该分身；账号登录、完整数据隔离、
-通知及业务功能尚未验证，不能仅凭创建成功就保证多账号完全隔离。
+以上是第一轮创建/签名验证，当时没有验证启动。后续启动测试及其边界见下文。
+
+
+## 第二轮：创建成功但分身无法启动（2026-11-17）
+
+用户界面报错：`系统未打开指定的分身，请检查分身应用是否完整。`
+严格签名通过并不代表 Electron 可以启动。本机使用原版 WorkBuddy 5.11.3，
+分别测试直接执行和与 AppDuo 相同的 `NSWorkspace.openApplication` 启动方式，确认存在三处兼容问题。
+
+### 1. 不能用显示名覆盖 Electron 的内部应用名
+
+之前把 `CFBundleName` 改成自定义显示名。Electron 使用内部应用名查找
+`Contents/Frameworks/<名称> Helper.app`，因此直接启动崩溃：
+
+```text
+FATAL:electron/shell/app/electron_main_delegate_mac.mm:67
+Unable to find helper app
+```
+
+修复：Electron 保留源应用的 `CFBundleName`（源应用没有该键时也不补造），
+只修改 `CFBundleDisplayName`。非 Electron 应用保持原有重命名行为。
+
+### 2. 不能批量重命名 Electron 的辅助可执行文件
+
+仅修复内部应用名后，进程能存活，但仍没有主窗口。
+在临时副本中恢复全部辅助可执行文件的原始文件名后，才实际出现主窗口。
+原有兼容符号链接不足以保证辅助程序正常工作；仅恢复单一 crashpad 名称也没有解决问题。
+
+修复：Electron 只单独重命名主进程，保留辅助可执行文件及对应
+`CFBundleExecutable` 的原名；原生应用的既有批量重命名规则不变。
+
+### 3. WorkBuddy 会覆盖通用 user-data-dir
+
+检查安装包内的应用代码确认，WorkBuddy 自行调用 `app.setPath('userData', ...)`，
+通用 `--user-data-dir` 参数不足以提供其配置隔离。
+新增 `com.tencent.workbuddy.mac.yaml`，使用 WorkBuddy 支持的目录变量：
+
+| 变量 | 分身目录下的路径 |
+| --- | --- |
+| `HOME` | `Home` |
+| `TMPDIR` | `Tmp` |
+| `WORKBUDDY_CONFIG_DIR` | `Config` |
+| `CODEBUDDY_CONFIG_DIR` | `Config` |
+| `WORKBUDDY_USER_DATA_DIR` | `UserData` |
+
+新建分身也保留 `--user-data-dir=<分身数据目录>/UserData`。
+更新旧 WorkBuddy 分身时只补齐缺失的环境变量，保留已有自定义覆盖值、原参数、
+数据根目录、UUID、显示名和创建时间；不复制原版账号数据，不删除或迁移既有文件。
+因此旧分身也需要用新引擎执行一次“更新”，仅更换 AppDuo GUI 不会改好旧分身包。
+
+### 本机现有分身已修复
+
+- 分身：`~/AppDuo/Apps/WorkBuddy 2.app`，显示名 `黄煜珂的小豆`。
+- 更新前已备份应用包及 `clones.json`：
+  `~/AppDuo/Backups/workbuddy-startup-20261117-231340/`。
+- 备份应用使用 `.app.backup` 后缀，避免被作为另一个可启动副本注册。
+- 更新后检查确认分身标识、名称、数据目录及创建时间不变。
+- 没有修改 `/Applications/WorkBuddy.app` 或替换 `/Applications/AppDuo.app`，
+  没有复制、删除原版账号数据。
+
+### 本轮验证
+
+1. 新策略生成的真实临时分身：`NSWorkspace` 回调路径确认为该分身，
+   启动后 18 秒进程存活，`isFinishedLaunching` 为 true，检测到 1440×900 的可见主窗口。
+2. 原地更新后的 `WorkBuddy 2.app`：同样检测到 1440×900 的可见主窗口，
+   回调确认打开的是分身而非原版；测试结束后正常终止该分身。
+   原版 WorkBuddy 进程仍保留。
+3. 临时分身在自身 `Home`、`Config`、`UserData`、`Tmp` 下生成运行目录；
+   原版及分身均通过 `codesign --verify --deep --strict`。
+4. `python3 script/test_electron_compatibility.py`：4 项全部通过，覆盖
+   Electron 内部名/辅助文件名、缺失内部名、原生应用命名和旧 WorkBuddy 环境变量迁移，
+   并检查更新保留记录及数据标记。
+5. 原有签名回归检查再次通过：裸资源包、资源篡改检测、有元数据资源包、
+   损坏代码包拒绝，以及嵌套代码包。
+6. Release CLI 同样运行上述 4 项回归并全部通过；新 GUI 包通过严格签名和资源检查，
+   新 DMG 通过校验与只读挂载后的签名/资源检查，镜像内主程序及 WorkBuddy 配方与构建产物一致。
+   `dist/SHA256SUMS` 已更新。
+7. 添加 `Tests/CloneCoreTests/ElectronCompatibilityTests.swift`。
+   本机缺少 XCTest 的限制仍在，这份 XCTest 未运行；不得将 CLI 回归结果表述为 XCTest 通过。
+
+测试环境注意：Codex 工具进程继承了 `ELECTRON_RUN_AS_NODE=1`。
+手动测试 Electron GUI 前必须从调用者环境中移除该变量，例如
+`/usr/bin/env -u ELECTRON_RUN_AS_NODE <启动诊断程序>`；
+仅从 `NSWorkspace.OpenConfiguration.environment` 字典中删除不足以清除继承值。
+
+### 新 GUI 包
+
+- `dist/AppDuo.app`：已包含创建与启动两轮修复。
+- `dist/AppDuo-0.1.9-workbuddy-startup-fix-arm64.dmg`：本轮安装镜像。
+- `dist/AppDuo-0.1.9-workbuddy-fix-arm64.dmg`：旧的仅创建/签名修复包，
+  **不包含本轮启动修复**，不要混用。
+
+先退出旧 AppDuo，再运行仓库内新版，或从新 DMG 手动替换安装。
+不要再用旧版更新此分身，否则可能重新引入启动问题。
+新构建仍为本地 ad-hoc 签名、未公证，并非新的官方版本。
+
+边界：已验证真实窗口启动，但没有登录账号，也没有验证消息收发、通知、
+插件、所有辅助工具和完整的账号隔离；不能据此保证所有业务功能或安全边界完全隔离。

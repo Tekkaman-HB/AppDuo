@@ -41,9 +41,18 @@ public actor CloneRepository {
             var effective = configuration
             // Apply newly introduced compatibility policy when updating legacy records.
             // Existing choices and embedded data paths remain unchanged.
-            if updating, effective.recipe.preserveMainExecutableName == nil,
+            if updating,
                let current = try Recipes.load(customDirectory: root.appendingPathComponent("recipes")).first(where: { $0.bundleID == effective.recipe.bundleID }) {
-                effective.recipe.preserveMainExecutableName = current.preserveMainExecutableName
+                if effective.recipe.preserveMainExecutableName == nil {
+                    effective.recipe.preserveMainExecutableName = current.preserveMainExecutableName
+                }
+                // Older generic WorkBuddy records only supplied --user-data-dir, but
+                // WorkBuddy overrides that switch from its own configuration paths.
+                // Fill missing isolation variables without replacing user overrides or
+                // moving/deleting any existing data directory.
+                if effective.recipe.bundleID == "com.tencent.workbuddy.mac" {
+                    effective.recipe.environment.merge(current.environment) { existing, _ in existing }
+                }
             }
             try Secrets.save(password, id: configuration.id)
             var record = try CloneEngine().build(effective, password: password, updating: updating, log: log)
